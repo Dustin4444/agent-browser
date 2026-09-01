@@ -32,6 +32,16 @@ fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
 }
 
+fn assert_error_code(resp: &Value, code: &str) {
+    assert_eq!(
+        resp.get("success").and_then(Value::as_bool),
+        Some(false),
+        "Expected failure but got: {}",
+        serde_json::to_string_pretty(resp).unwrap_or_default()
+    );
+    assert_eq!(resp.get("code").and_then(Value::as_str), Some(code));
+}
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
@@ -39,8 +49,399 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
         "upload_probe" => include_str!("test_fixtures/upload_probe.html"),
+        "webmcp_frame_probe" => include_str!("test_fixtures/webmcp_frame_probe.html"),
+        "webmcp_probe" => include_str!("test_fixtures/webmcp_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_webmcp_discovery_invocation_and_cancellation() {
+    let (fixture_url, fixture_server) = start_webmcp_server().await;
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": fixture_url
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let child_ready = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            let resp = execute_command(
+                &json!({
+                    "id": "2b",
+                    "action": "evaluate",
+                    "script": "document.getElementById('tool-frame')?.contentDocument?.body?.dataset?.webmcpReady === 'true'"
+                }),
+                &mut state,
+            )
+            .await;
+            if get_data(&resp)["result"] == true {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(
+        child_ready.is_ok(),
+        "child WebMCP fixture did not become ready"
+    );
+    state.drain_cdp_events_background().await.unwrap();
+
+    let resp = execute_command(&json!({ "id": "3", "action": "webmcp_list" }), &mut state).await;
+    assert_success(&resp);
+    let tools = get_data(&resp)["tools"].as_array().unwrap();
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "set_message")
+        .expect("set_message should be discovered");
+    assert!(tool["frameId"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(tool["origin"]
+        .as_str()
+        .is_some_and(|origin| origin.starts_with("http://127.0.0.1:")));
+    assert_eq!(tool["inputSchema"]["type"], "object");
+    let duplicate_tools = tools
+        .iter()
+        .filter(|tool| tool["name"] == "duplicate_tool")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        duplicate_tools.len(),
+        2,
+        "unexpected tools: {}",
+        serde_json::to_string_pretty(tools).unwrap_or_default()
+    );
+    let main_frame_id = tool["frameId"].as_str().unwrap();
+    let child_frame_id = duplicate_tools
+        .iter()
+        .find_map(|tool| {
+            let frame_id = tool["frameId"].as_str()?;
+            (frame_id != main_frame_id).then_some(frame_id)
+        })
+        .unwrap()
+        .to_string();
+
+    let resp = execute_command(
+        &json!({
+            "id": "3b",
+            "action": "webmcp_invoke",
+            "tool": "duplicate_tool",
+            "params": {}
+        }),
+        &mut state,
+    )
+    .await;
+    assert_error_code(&resp, "webmcp_ambiguous_tool");
+
+    let resp = execute_command(
+        &json!({
+            "id": "3c",
+            "action": "webmcp_invoke",
+            "tool": "duplicate_tool",
+            "frameId": child_frame_id,
+            "params": {},
+            "timeout": 5000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["output"]["scope"], "frame");
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "webmcp_invoke",
+            "tool": "set_message",
+            "params": { "message": "WebMCP works" },
+            "timeout": 5000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["status"], "completed");
+    assert_eq!(get_data(&resp)["output"]["message"], "WebMCP works");
+
+    let resp = execute_command(
+        &json!({
+            "id": "4b",
+            "action": "webmcp_invoke",
+            "tool": "fail_tool",
+            "params": {},
+            "timeout": 5000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["status"], "failed");
+    assert!(get_data(&resp)["error"].is_string());
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "evaluate",
+            "script": "document.getElementById('result').textContent"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "WebMCP works");
+
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "webmcp_invoke",
+            "tool": "wait_for_cancel",
+            "params": {},
+            "detach": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let invocation_id = get_data(&resp)["invocationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(get_data(&resp)["status"], "pending");
+    let pending = execute_command(
+        &json!({
+            "id": "6b",
+            "action": "webmcp_result",
+            "invocationId": invocation_id,
+            "timeout": 10
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&pending);
+    assert_eq!(get_data(&pending)["status"], "timed_out");
+
+    let resp = execute_command(
+        &json!({
+            "id": "6c",
+            "action": "webmcp_invoke",
+            "tool": "wait_for_cancel",
+            "params": {},
+            "detach": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let invocation_id = get_data(&resp)["invocationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    state.drain_cdp_events_background().await.unwrap();
+    assert_eq!(
+        state.webmcp.invocations[&invocation_id].status,
+        "pending",
+        "long-running fixture terminated before cancellation: {}",
+        state.webmcp.invocations[&invocation_id].to_json()
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "7",
+            "action": "webmcp_cancel",
+            "invocationId": invocation_id,
+            "timeout": 5000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["status"], "canceled");
+
+    let resp = execute_command(
+        &json!({
+            "id": "8",
+            "action": "webmcp_invoke",
+            "tool": "wait_for_cancel",
+            "params": {},
+            "timeout": 25
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["status"], "timed_out");
+
+    let resp = execute_command(
+        &json!({
+            "id": "9",
+            "action": "webmcp_invoke",
+            "tool": "missing_tool",
+            "params": {}
+        }),
+        &mut state,
+    )
+    .await;
+    assert_error_code(&resp, "webmcp_tool_not_found");
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "webmcp_invoke",
+            "tool": "set_message",
+            "params": ["not", "an", "object"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_error_code(&resp, "webmcp_invalid_input");
+
+    let resp = execute_command(
+        &json!({
+            "id": "11",
+            "action": "webmcp_invoke",
+            "tool": "wait_for_cancel",
+            "params": {},
+            "detach": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let stale_id = get_data(&resp)["invocationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = execute_command(
+        &json!({
+            "id": "12",
+            "action": "navigate",
+            "url": "about:blank"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "13",
+            "action": "webmcp_result",
+            "invocationId": stale_id,
+            "timeout": 100
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["status"], "failed");
+    assert!(get_data(&resp)["error"]
+        .as_str()
+        .is_some_and(|error| error.starts_with("webmcp_context_changed:")));
+
+    let resp = execute_command(
+        &json!({
+            "id": "14",
+            "action": "navigate",
+            "url": fixture_url
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "15", "action": "webmcp_list" }), &mut state).await;
+    assert_success(&resp);
+    let frame_id = get_data(&resp)["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "frame_wait")
+        .and_then(|tool| tool["frameId"].as_str())
+        .unwrap()
+        .to_string();
+    let resp = execute_command(
+        &json!({
+            "id": "16",
+            "action": "webmcp_invoke",
+            "tool": "frame_wait",
+            "frameId": frame_id,
+            "params": {},
+            "detach": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let frame_invocation_id = get_data(&resp)["invocationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = execute_command(
+        &json!({
+            "id": "17",
+            "action": "evaluate",
+            "script": "document.getElementById('tool-frame').remove()"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    let resp = execute_command(
+        &json!({
+            "id": "18",
+            "action": "webmcp_result",
+            "invocationId": frame_invocation_id,
+            "timeout": 100
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["status"], "failed");
+    assert!(get_data(&resp)["error"]
+        .as_str()
+        .is_some_and(|error| error.starts_with("webmcp_context_changed:")));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(state.webmcp.invocations.is_empty());
+    fixture_server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_webmcp_opt_out_returns_no_tools() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "webmcp": false
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "2", "action": "webmcp_list" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tools"], json!([]));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
 }
 
 fn native_test_fixture_url(name: &str) -> String {
@@ -4640,6 +5041,36 @@ async fn start_echo_server() -> (String, tokio::task::JoinHandle<()>) {
     });
 
     (base_url, handle)
+}
+
+async fn start_webmcp_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let request = String::from_utf8_lossy(&buffer);
+                let body = if request.starts_with("GET /frame.html ") {
+                    native_test_fixture_html("webmcp_frame_probe")
+                        .replace("__PORT__", &port.to_string())
+                } else {
+                    native_test_fixture_html("webmcp_probe").replace("__PORT__", &port.to_string())
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), handle)
 }
 
 /// Starts a tiny cookie-gated app that behaves like a Next dev target with

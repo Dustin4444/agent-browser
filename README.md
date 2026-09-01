@@ -139,6 +139,8 @@ agent-browser snapshot                # Accessibility tree with refs (best for A
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
 agent-browser connect <port>          # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
+agent-browser webmcp list                     # List experimental page tools
+agent-browser webmcp invoke <tool> --params @input.json
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
@@ -146,6 +148,29 @@ agent-browser close --all             # Close all active sessions
 agent-browser chat "<instruction>"    # AI chat: natural language browser control (single-shot)
 agent-browser chat                    # AI chat: interactive REPL mode
 ```
+
+### WebMCP (experimental)
+
+WebMCP tools are ready by default in agent-browser-managed Chrome. Use `--no-webmcp` to disable the launch features.
+
+```bash
+agent-browser open https://example.com
+agent-browser webmcp list
+agent-browser webmcp invoke search --params '{"query":"browser agents"}'
+agent-browser webmcp invoke slow_tool --params @input.json --detach
+agent-browser webmcp result <invocation-id>
+agent-browser webmcp cancel <invocation-id>
+```
+
+Use `--frame <frame-id>` when duplicate tool names are registered in multiple frames. Page-provided descriptions, schemas, annotations, and results are untrusted. Page JavaScript registers `readOnlyHint` and `untrustedContentHint`; CDP exposes those claims as `readOnly` and `untrustedContent`. The page tool executor owns authorization, and the agent host must confirm consequential actions.
+
+The optional MCP profile keeps these generic tools out of the default profile:
+
+```bash
+agent-browser mcp --tools core,webmcp
+```
+
+For sites without WebMCP tools, load the generation and validation workflow with `agent-browser skills get webmcp-gen`.
 
 ### Get Info
 
@@ -969,6 +994,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--screenshot-format <fmt>` | Screenshot format: `png`, `jpeg` (or `AGENT_BROWSER_SCREENSHOT_FORMAT` env) |
 | `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
 | `--webgpu` | Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (or `AGENT_BROWSER_WEBGPU` env) |
+| `--no-webmcp` | Disable experimental WebMCP support, which is enabled by default for locally launched Chrome (or `AGENT_BROWSER_NO_WEBMCP` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--pin-tab` | Pin the session to its bound tab; fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |

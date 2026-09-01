@@ -336,6 +336,13 @@ agent-browser state load auth.json    # Restore saved state
 agent-browser stream status --json    # Enabled state, port, client count
 agent-browser stream enable           # Start the WebSocket stream server
 agent-browser stream enable --port 9223
+
+# Experimental WebMCP page tools
+agent-browser webmcp list
+agent-browser webmcp invoke <tool> --params '{"key":"value"}'
+agent-browser webmcp invoke <tool> --params @input.json --detach
+agent-browser webmcp result <invocation-id>
+agent-browser webmcp cancel <invocation-id>
 agent-browser stream disable          # Stop it
 ```
 
@@ -399,6 +406,7 @@ agent-browser --session <name> ...    # Isolated browser session
 agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless; on displayless Linux an Xvfb display starts automatically)
 agent-browser --webgpu ...            # Enable WebGPU (SwiftShader software Vulkan on Linux, no GPU needed)
+agent-browser --no-webmcp ...         # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
 agent-browser --cdp <port|url> ...    # Connect via CDP; root query slash is optional
 agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab

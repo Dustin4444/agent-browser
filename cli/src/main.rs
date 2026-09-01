@@ -94,6 +94,12 @@ fn attach_script_launch_options(launch_cmd: &mut serde_json::Value, flags: &Flag
     }
 }
 
+fn attach_webmcp_launch_option(launch_cmd: &mut serde_json::Value, flags: &Flags) {
+    if flags.no_webmcp || flags.cli_no_webmcp {
+        launch_cmd["webmcp"] = json!(!flags.no_webmcp);
+    }
+}
+
 fn attach_allowed_domains_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
     if let Some(ref domains) = flags.allowed_domains {
         launch_cmd["allowedDomains"] = json!(domains);
@@ -131,6 +137,7 @@ fn build_provider_launch_command(provider: &str, flags: &Flags) -> serde_json::V
     });
     launch_cmd["plugins"] = json!(flags.plugins.clone());
     attach_script_launch_options(&mut launch_cmd, flags);
+    attach_webmcp_launch_option(&mut launch_cmd, flags);
     attach_allowed_domains_to_launch_command(&mut launch_cmd, flags);
     attach_restore_config_to_command(&mut launch_cmd, flags);
     attach_ca_cert_to_launch_command(&mut launch_cmd, flags);
@@ -252,6 +259,8 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         )
         || flags.webgpu
         || flags.cli_webgpu
+        || flags.no_webmcp
+        || flags.cli_no_webmcp
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
@@ -1736,6 +1745,7 @@ fn main() {
             "autoConnect": true
         });
         attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_webmcp_launch_option(&mut launch_cmd, &flags);
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_pin_tab_to_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
@@ -1836,6 +1846,7 @@ fn main() {
 
         let mut launch_cmd = launch_cmd;
         attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_webmcp_launch_option(&mut launch_cmd, &flags);
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_pin_tab_to_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
@@ -1993,6 +2004,7 @@ fn main() {
         if flags.webgpu || flags.cli_webgpu {
             launch_cmd["webgpu"] = json!(flags.webgpu);
         }
+        attach_webmcp_launch_option(&mut launch_cmd, &flags);
 
         // Env-only opt-out for automatic Xvfb; always stamped from the CLI's
         // fresh environment so both setting and unsetting the var take effect
@@ -2458,6 +2470,8 @@ mod tests {
         flags.cli_hide_scrollbars = false;
         flags.webgpu = false;
         flags.cli_webgpu = false;
+        flags.no_webmcp = false;
+        flags.cli_no_webmcp = false;
         flags.color_scheme = None;
         flags.download_path = None;
         flags.engine = None;
@@ -2611,6 +2625,27 @@ mod tests {
     }
 
     #[test]
+    fn test_published_schemas_define_matching_no_webmcp_boolean() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cli should have a repository parent");
+        let root_schema: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo_root.join("agent-browser.schema.json")).unwrap(),
+        )
+        .unwrap();
+        let docs_schema: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo_root.join("docs/public/schema.json")).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(root_schema["properties"]["noWebmcp"]["type"], "boolean");
+        assert_eq!(
+            root_schema["properties"]["noWebmcp"],
+            docs_schema["properties"]["noWebmcp"]
+        );
+    }
+
+    #[test]
     fn test_allowed_domains_requests_local_launch_configuration() {
         let mut flags = neutral_launch_config_flags();
         let command = json!({ "action": "snapshot" });
@@ -2621,6 +2656,19 @@ mod tests {
 
         flags.cdp = Some("9222".to_string());
         assert!(!should_send_local_launch_config(&flags, &command));
+    }
+
+    #[test]
+    fn test_no_webmcp_requests_local_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        let command = json!({ "action": "snapshot" });
+        flags.no_webmcp = true;
+        flags.cli_no_webmcp = true;
+        assert!(should_send_local_launch_config(&flags, &command));
+
+        let mut launch = json!({ "action": "launch" });
+        attach_webmcp_launch_option(&mut launch, &flags);
+        assert_eq!(launch["webmcp"], false);
     }
 
     #[test]

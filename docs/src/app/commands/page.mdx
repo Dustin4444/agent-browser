@@ -33,6 +33,8 @@ agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
 agent-browser connect <port|url>      # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
+agent-browser webmcp list                     # List experimental page tools
+agent-browser webmcp invoke <tool> --params @input.json
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
@@ -580,6 +582,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --screenshot-format <fmt> # Format: png (default), jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
 --headed                 # Show browser window (not headless)
 --webgpu                 # Enable WebGPU (software Vulkan on Linux, no GPU needed)
+--no-webmcp              # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
 --cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional
 --auto-connect           # Auto-discover and connect to running Chrome
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference

@@ -148,6 +148,55 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    match action {
+        Some("webmcp_list") => {
+            let tools = data.get("tools")?.as_array()?;
+            if tools.is_empty() {
+                return Some("No WebMCP tools registered on the current page".to_string());
+            }
+            Some(
+                tools
+                    .iter()
+                    .map(format_webmcp_tool_text)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        Some("webmcp_invoke" | "webmcp_result" | "webmcp_cancel") => {
+            let invocation_id = data.get("invocationId")?.as_str()?;
+            let status = data.get("status")?.as_str()?;
+            let mut output = format!("{}: {}", invocation_id, status);
+            if let Some(result) = data.get("output") {
+                output.push('\n');
+                output.push_str(
+                    &serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
+                );
+            }
+            if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                output.push('\n');
+                output.push_str(error);
+            }
+            Some(output)
+        }
+        _ => None,
+    }
+}
+
+fn format_webmcp_tool_text(tool: &serde_json::Value) -> String {
+    let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let description = tool
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let frame = tool.get("frameId").and_then(|v| v.as_str()).unwrap_or("?");
+    let origin = tool
+        .get("origin")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    format!("{} [{}]\n  {}\n  {}", name, frame, description, origin)
+}
+
 fn confirmation_data(data: &serde_json::Value) -> Option<&serde_json::Value> {
     if data
         .get("confirmation_required")
@@ -456,6 +505,23 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         if let Some(output) = format_stream_status_text(action, data) {
             println!("{}", output);
+            return;
+        }
+        if action == Some("webmcp_list") {
+            let Some(tools) = data.get("tools").and_then(|tools| tools.as_array()) else {
+                return;
+            };
+            if tools.is_empty() {
+                println!("No WebMCP tools registered on the current page");
+                return;
+            }
+            for tool in tools {
+                print_with_boundaries(&format_webmcp_tool_text(tool), boundary_origin(tool), opts);
+            }
+            return;
+        }
+        if let Some(output) = format_webmcp_text(action, data) {
+            print_with_boundaries(&output, boundary_origin(data), opts);
             return;
         }
         if action == Some("vitals") {
@@ -3619,6 +3685,13 @@ Streaming:
   stream disable             Stop runtime WebSocket streaming
   stream status              Show streaming status and active port
 
+WebMCP (experimental):
+  webmcp list                List tools registered by the current page
+  webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
+                             --frame <frame-id>, --detach, and --timeout <ms>
+  webmcp result <id>         Wait for a detached invocation result
+  webmcp cancel <id>         Cancel an active invocation
+
 React (requires `open --enable react-devtools`):
   react tree                 Full React component tree (depth id parent name columns)
   react inspect <id>         Inspect one fiber (props, hooks, state, source)
@@ -3756,6 +3829,8 @@ Options:
   --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
+  --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
+                             (or AGENT_BROWSER_NO_WEBMCP env)
   --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
   --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
@@ -4004,7 +4079,7 @@ pub fn print_version() {
 mod tests {
     use super::{
         boundary_origin, format_a11y_text, format_storage_text, format_vitals_text,
-        format_with_boundaries, OutputOptions,
+        format_webmcp_text, format_webmcp_tool_text, format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
 
@@ -4254,5 +4329,60 @@ hydration: -  phases: 0  hydratedComponents: 0"
             boundary_origin(&json!({ "url": "https://example.com/source" })),
             Some("https://example.com/source")
         );
+    }
+
+    #[test]
+    fn test_webmcp_text_can_use_content_boundaries() {
+        let data = json!({
+            "invocationId": "i1",
+            "status": "completed",
+            "origin": "https://example.com",
+            "output": {"message": "untrusted"}
+        });
+        let text = format_webmcp_text(Some("webmcp_invoke"), &data).unwrap();
+        let rendered = format_with_boundaries(
+            &text,
+            boundary_origin(&data),
+            &OutputOptions {
+                content_boundaries: true,
+                ..OutputOptions::default()
+            },
+        );
+        assert!(rendered.contains("origin=https://example.com"));
+        assert!(rendered.contains("\"message\": \"untrusted\""));
+    }
+
+    #[test]
+    fn test_webmcp_list_tools_keep_their_own_origin() {
+        let first = json!({
+            "name": "search",
+            "frameId": "frame-a",
+            "origin": "https://a.example",
+            "description": "Search A"
+        });
+        let second = json!({
+            "name": "search",
+            "frameId": "frame-b",
+            "origin": "https://b.example",
+            "description": "Search B"
+        });
+        let opts = OutputOptions {
+            content_boundaries: true,
+            ..OutputOptions::default()
+        };
+        let first = format_with_boundaries(
+            &format_webmcp_tool_text(&first),
+            boundary_origin(&first),
+            &opts,
+        );
+        let second = format_with_boundaries(
+            &format_webmcp_tool_text(&second),
+            boundary_origin(&second),
+            &opts,
+        );
+        assert!(first.contains("origin=https://a.example"));
+        assert!(!first.contains("origin=https://b.example"));
+        assert!(second.contains("origin=https://b.example"));
+        assert!(!second.contains("origin=https://a.example"));
     }
 }
