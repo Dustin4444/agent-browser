@@ -1,8 +1,33 @@
 # agent-browser
 
-## 0.35.2
+## 0.36.0
 
 <!-- release:start -->
+### New Features
+
+- Added experimental **WebMCP support** for discovering and invoking tools provided by the current page, including frame-aware tool selection, detached results, cancellation, bounded metadata and output handling, and an opt-in MCP tool profile. WebMCP is enabled by default for locally managed Chrome and can be disabled with `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP`.
+- Added a **WebMCP generation skill** that helps agents expose existing page workflows as validated page tools while recording safety constraints, deterministic checks, and fallback behavior.
+
+### Improvements
+
+- Updated the **eve integration** to 0.47.3 and raised its compatibility floor to 0.39.1.
+- Updated **brace-expansion dependency resolutions** across the project lockfiles.
+
+### Bug Fixes
+
+- Removed the obsolete **Lightpanda session timeout** argument so launches use the current supported server options.
+
+### Contributors
+
+- @ctate
+- @Railly
+- @anupamme
+- @arrufat
+
+<!-- release:end -->
+
+## 0.35.2
+
 ### Security
 
 - Hardened **dashboard origin validation and reverse-proxy access** with same-origin provenance enforcement that defends against DNS rebinding, form/header smuggling, and cross-origin requests. Reverse-proxied origins now require exact HTTPS allowlisting and generated token authentication, while tokenless IPv4 and IPv6 loopback access remains supported. Dashboard options are validated strictly, and CLI and MCP lifecycle behavior is aligned (#1738)
@@ -15,8 +40,6 @@
 
 - @ctate
 - @Railly
-
-<!-- release:end -->
 
 ## 0.35.1
 

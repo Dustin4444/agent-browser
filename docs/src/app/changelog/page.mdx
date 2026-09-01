@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.36.0
+
+<p className="text-[#888] text-sm">September 1, 2026</p>
+
+### New Features
+
+- Added experimental **WebMCP support** for discovering and invoking tools provided by the current page, including frame-aware tool selection, detached results, cancellation, bounded metadata and output handling, and an opt-in MCP tool profile. WebMCP is enabled by default for locally managed Chrome and can be disabled with `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP`.
+- Added a **WebMCP generation skill** that helps agents expose existing page workflows as validated page tools while recording safety constraints, deterministic checks, and fallback behavior.
+
+### Improvements
+
+- Updated the **eve integration** to 0.47.3 and raised its compatibility floor to 0.39.1.
+- Updated **brace-expansion dependency resolutions** across the project lockfiles.
+
+### Bug Fixes
+
+- Removed the obsolete **Lightpanda session timeout** argument so launches use the current supported server options.
+
+---
+
 ## v0.35.2
 
 <p className="text-[#888] text-sm">August 31, 2026</p>
