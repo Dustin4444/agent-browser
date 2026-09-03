@@ -710,6 +710,7 @@ impl DaemonState {
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
         let proxy_credentials = self.proxy_credentials.clone();
+        let capture_session = self.recording_state.capture_session.clone();
 
         self.fetch_handler_task = Some(tokio::spawn(async move {
             loop {
@@ -765,6 +766,15 @@ impl DaemonState {
                         let target_info = event.params.get("targetInfo").and_then(|value| {
                             serde_json::from_value::<TargetInfo>(value.clone()).ok()
                         });
+                        // The recorder's screencast session shares a target
+                        // with a page session that already carries the
+                        // controls.
+                        let is_recorder_session = target_info.as_ref().is_some_and(|target| {
+                            recording::owns_attachment(&capture_session, &target.target_id, &sid)
+                        });
+                        if is_recorder_session {
+                            continue;
+                        }
                         let target_needs_controls = target_info
                             .as_ref()
                             .is_some_and(target_supports_network_controls);
@@ -960,23 +970,42 @@ impl DaemonState {
         }
     }
 
-    /// Spawn a background task that polls screenshots and pipes them to ffmpeg.
+    /// Attach the recorder's own CDP session to the page behind `session_id`
+    /// and spawn the task that screencasts it into ffmpeg.
     async fn start_recording_task(
         &mut self,
         client: Arc<CdpClient>,
         session_id: String,
     ) -> Result<(), String> {
+        let capture_session = match recording::attach_capture_session(
+            &client,
+            &session_id,
+            &self.recording_state.capture_session,
+        )
+        .await
+        {
+            Ok(capture_session) => capture_session,
+            Err(e) => {
+                // `recording_start` already marked the state active.
+                self.recording_state.active = false;
+                return Err(e);
+            }
+        };
         let shared_count = Arc::new(AtomicU64::new(0));
+        let shared_captured = Arc::new(AtomicU64::new(0));
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let handle = recording::spawn_recording_task(
             client,
-            session_id,
+            capture_session,
             self.recording_state.output_path.clone(),
+            self.recording_state.fps,
             shared_count.clone(),
+            shared_captured.clone(),
             cancel_rx,
         );
         self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
+        self.recording_state.shared_captured_count = Some(shared_captured);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
     }
@@ -1472,6 +1501,15 @@ impl DaemonState {
                                 match serde_json::from_value::<TargetInfo>(
                                     target_info_value.clone(),
                                 ) {
+                                    // The recorder's screencast session is
+                                    // not a tab and must not have page
+                                    // domains enabled on it.
+                                    Ok(target_info)
+                                        if recording::owns_attachment(
+                                            &self.recording_state.capture_session,
+                                            &target_info.target_id,
+                                            sid,
+                                        ) => {}
                                     Ok(target_info) if target_info.target_type == "iframe" => {
                                         // For OOPIF targets, Chrome uses the frameId as
                                         // the targetId, so we can key iframe_sessions by it.
@@ -6916,6 +6954,21 @@ async fn handle_profiler_stop(cmd: &Value, state: &mut DaemonState) -> Result<Va
     native_tracing::profiler_stop(&mgr.client, &session_id, &mut state.tracing_state, path).await
 }
 
+/// Read an optional `fps` field from a recording command, rejecting rates the
+/// recorder cannot honor before any browser work happens.
+fn recording_fps_from_command(cmd: &Value) -> Result<Option<u32>, String> {
+    match cmd.get("fps") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = value
+                .as_u64()
+                .filter(|v| *v <= u32::MAX as u64)
+                .ok_or_else(|| format!("Invalid fps: {} is not a positive integer", value))?;
+            recording::validate_fps(raw as u32).map(Some)
+        }
+    }
+}
+
 async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = cmd
         .get("path")
@@ -6926,6 +6979,10 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .get("url")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
+
+    // Validate the rate before spinning up a recording context so a bad value
+    // costs nothing.
+    let fps = recording_fps_from_command(cmd)?;
 
     let viewport = state.viewport;
     let domain_filter = state.domain_filter.read().await.clone();
@@ -7070,7 +7127,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         }
     }
 
-    let result = recording::recording_start(&mut state.recording_state, path)?;
+    let result = recording::recording_start(&mut state.recording_state, path, fps)?;
     state.start_recording_task(client, new_session_id).await?;
 
     if let Some(ref server) = state.stream_server {
@@ -7081,8 +7138,11 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
 }
 
 async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String> {
-    state.stop_recording_task().await?;
+    // Clear the recording state even when the capture task failed, so a
+    // broken take does not block the next `record start`.
+    let task_result = state.stop_recording_task().await;
     let result = recording::recording_stop(&mut state.recording_state);
+    task_result?;
 
     if let Some(ref server) = state.stream_server {
         server.set_recording(false, &state.engine).await;
@@ -7101,6 +7161,9 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
+
+    // Validate the rate before stopping the in-flight take.
+    let fps = recording_fps_from_command(cmd)?;
 
     {
         let domain_filter = state.domain_filter.read().await;
@@ -7128,7 +7191,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         None
     };
 
-    recording::recording_start(&mut state.recording_state, path)?;
+    recording::recording_start(&mut state.recording_state, path, fps)?;
 
     if let Some((client, session_id)) = recording_target {
         state.start_recording_task(client, session_id).await?;
@@ -7138,6 +7201,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         "restarted": true,
         "previousPath": previous_path,
         "path": path,
+        "fps": state.recording_state.fps,
     }))
 }
 
@@ -10085,16 +10149,19 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         return Err("A recording is already in progress".to_string());
     }
 
+    let fps = recording_fps_from_command(cmd)?;
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    recording::recording_start(&mut state.recording_state, path)?;
+    recording::recording_start(&mut state.recording_state, path, fps)?;
     state
         .start_recording_task(mgr.client.clone(), session_id)
         .await?;
 
     Ok(json!({
         "started": true,
+        "fps": state.recording_state.fps,
         "note": "Video recording started. Use video_stop to save the recording."
     }))
 }
